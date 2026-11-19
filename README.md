@@ -28,4 +28,7 @@ Viewer:
 - **Text**: heat-map over the running text. Works better for long answers. It can also colour each token by its probability or by the model's entropy.
 - **Matrix**: the full query × key heat-map for the selected layer and heads.
 - **Head overview**: a layers × heads heat-map of a statistic, such as previous-token heads, BOS sink or answer→prompt attention. Click a cell to jump to that layer and head.
+- **Scale** (linear / √ / log, √ by default) sets how weights map to colour intensity. The legend above each view shows the mapping. Within one layer and head, attention really is sparse; √ and log only make the small weights visible.
 - **Hide BOS sink**: Gemma models put most of their attention on `<bos>`. This hides that token and renormalizes the remaining weights.
+
+Note: attention rollout (Abnar & Zuidema 2020) was tried and deliberately left out. With causal attention, the first tokens can only attend to themselves, so the product over layers puts about 95% of the mass on the first token kept, whichever token is queried. For "which earlier tokens did this token use", gradient-based attribution or value-weighted methods (ALTI) fit decoders better.

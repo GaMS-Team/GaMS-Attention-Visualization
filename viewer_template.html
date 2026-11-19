@@ -80,6 +80,9 @@ main.layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 1
 #mat { display: block; image-rendering: auto; cursor: crosshair; }
 #overview { display: block; cursor: pointer; }
 #tooltip { position: fixed; pointer-events: none; z-index: 20; background: var(--ink); color: var(--bg); font: 12px var(--mono); padding: 4px 7px; border-radius: 5px; white-space: pre; display: none; max-width: 520px; overflow: hidden; }
+.legendbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 4px 0 8px; min-height: 18px; }
+.lg { font-size: 11px; color: var(--muted); display: inline-flex; align-items: center; gap: 3px; }
+.lg i { display: inline-block; width: 16px; height: 12px; border-radius: 2px; border: 1px solid var(--line); }
 .loading { padding: 30px; color: var(--muted); }
 </style>
 </head>
@@ -94,7 +97,8 @@ main.layout { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 1
     </div>
     <label title="Gemma-style models dump most attention on the <bos> token (attention sink). Hide it and renormalise the remaining weights."><input type="checkbox" id="hideBos" checked> Hide BOS sink</label>
     <label title="Scale colour intensity relative to the strongest weight of the focused row/column"><input type="checkbox" id="rowNorm" checked> Scale to max</label>
-    <label>Min weight <input type="range" id="minW" min="0" max="0.3" step="0.005" value="0.02"><span id="minWVal" class="small muted"></span></label>
+    <label title="How weights map to colour intensity. √ and log make small weights visible; the legend shows the mapping.">Scale <select id="scaleSel"><option value="linear">linear</option><option value="sqrt" selected>√ (sqrt)</option><option value="log">log</option></select></label>
+    <label>Min weight <input type="range" id="minW" min="0" max="0.1" step="0.001" value="0.005"><span id="minWVal" class="small muted"></span></label>
     <label id="dirWrap">Direction <select id="dirSel"><option value="q">token attends to …</option><option value="k">token is attended by …</option></select></label>
     <label id="colorWrap">Colour <select id="colorMode"><option value="attn">attention</option><option value="prob">token probability</option><option value="entropy">prediction entropy</option></select></label>
   </div>
@@ -137,7 +141,8 @@ const METRICS = {
 const ROW = 20, COLW = 190, GAP = 260;
 
 const state = {
-  p: 0, layer: 0, heads: new Set(), view: "lines", hideBos: true, rowNorm: true, minW: 0.02,
+  p: 0, layer: 0, heads: new Set(), view: "lines", hideBos: true, rowNorm: true, minW: 0.005,
+  scale: "sqrt",
   colorMode: "attn", dir: "q", pinned: null, hover: null, metric: "resp_to_prompt",
 };
 const cache = new Map();
@@ -163,6 +168,23 @@ function rgba(c, a) { const [r, g, b] = hexRgb(c); return `rgba(${r},${g},${b},$
 const current = () => state.hover || state.pinned;
 const selHeads = () => [...state.heads].sort((a, b) => a - b);
 function focusColor() { const hs = selHeads(); return hs.length === 1 ? headColor(hs[0]) : cssVar("--accent"); }
+// weight -> colour intensity in [0, 1]
+function intensity(w, max) {
+  let x = state.rowNorm ? w / (max || 1) : w;
+  x = Math.max(0, Math.min(1, x));
+  if (state.scale === "sqrt") return Math.sqrt(x);
+  if (state.scale === "log") return x <= 0 ? 0 : Math.max(0, 1 + Math.log10(x) / 3);   // 0.001 -> 0, 1 -> 1
+  return x;
+}
+// max == null: several heads, each scaled to its own max
+function legendHtml(color, max) {
+  const ticks = [0.005, 0.02, 0.05, 0.1, 0.25, 0.5, 1];
+  const rel = state.rowNorm;
+  const m = max == null ? 1 : max;
+  const maxTxt = rel && max != null ? `, max = ${max.toFixed(3)}` : "";
+  return `<span class="muted small">colour = ${rel ? "weight / max" : "weight"} (${state.scale} scale${maxTxt}):</span> ` +
+    ticks.map((t) => `<span class="lg"><i style="background:${rgba(color, intensity(rel ? t * m : t, m) * 0.85)}"></i>${t}</span>`).join("");
+}
 
 // ---------------------------------------------------------------- data decoding
 function b64ToBytes(b64) { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; }
@@ -236,6 +258,7 @@ function initControls() {
   $("rowNorm").onchange = (e) => { state.rowNorm = e.target.checked; render(); };
   $("minW").oninput = (e) => { state.minW = +e.target.value; $("minWVal").textContent = state.minW.toFixed(3); render(); };
   $("minWVal").textContent = state.minW.toFixed(3);
+  $("scaleSel").onchange = (e) => { state.scale = e.target.value; render(); };
   $("dirSel").onchange = (e) => { state.dir = e.target.value; if (state.pinned) state.pinned.side = state.dir; render(); };
   $("colorMode").onchange = (e) => { state.colorMode = e.target.value; render(); };
   $("headsAll").onclick = () => { state.heads = new Set([...Array(P().n_heads).keys()]); render(); };
@@ -372,8 +395,9 @@ function buildLines() {
   inner.addEventListener("mouseover", (e) => { const t = e.target.closest(".tok"); if (t) setHover({ idx: +t.dataset.i, side: t.dataset.side }); });
   inner.addEventListener("mouseleave", () => setHover(null));
   inner.addEventListener("click", (e) => { const t = e.target.closest(".tok"); if (t) pin({ idx: +t.dataset.i, side: t.dataset.side }); });
-  scroll.appendChild(inner); body.appendChild(scroll);
-  els = { svg, left, right, scroll, prevFocus: [] };
+  const legend = document.createElement("div"); legend.className = "legendbar";
+  scroll.appendChild(inner); body.appendChild(legend); body.appendChild(scroll);
+  els = { svg, left, right, scroll, legend, prevFocus: [] };
 }
 function drawLines(scroll) {
   const f = current(); if (!f) return;
@@ -387,13 +411,15 @@ function drawLines(scroll) {
     const stripW = COLW / n, stripX = f.side === "q" ? hi * stripW : COLW + GAP + hi * stripW;
     for (let j = 0; j < L; j++) {
       const w = v[j]; if (w < state.minW || w <= 0) continue;
-      const a = Math.min(1, state.rowNorm ? w / m : w);
+      const a = intensity(w, m);
       const [kk, qq] = f.side === "q" ? [j, f.idx] : [f.idx, j];
       s += `<line x1="${COLW}" y1="${yc(kk)}" x2="${COLW + GAP}" y2="${yc(qq)}" stroke="${c}" stroke-opacity="${a.toFixed(3)}" stroke-width="2"/>`;
       s += `<rect x="${stripX.toFixed(1)}" y="${j * ROW}" width="${stripW.toFixed(1)}" height="${ROW}" fill="${c}" fill-opacity="${(a * 0.75).toFixed(3)}"/>`;
     }
   });
   els.svg.innerHTML = s;
+  els.legend.innerHTML = legendHtml(focusColor(), n === 1 ? vmax(headVector(hs[0], f)) : null) +
+    (n > 1 && state.rowNorm ? ' <span class="muted small">(each head scaled to its own max)</span>' : "");
   if (scroll) fe.scrollIntoView({ block: "nearest" });
 }
 
@@ -414,8 +440,9 @@ function buildText() {
   box.addEventListener("mouseover", (e) => { const t = e.target.closest(".ttok"); if (t) setHover({ idx: +t.dataset.i, side: state.dir }); });
   box.addEventListener("mouseleave", () => setHover(null));
   box.addEventListener("click", (e) => { const t = e.target.closest(".ttok"); if (t) pin({ idx: +t.dataset.i, side: state.dir }); });
-  body.appendChild(box);
-  els = { spans, box, prev: null };
+  const legend = document.createElement("div"); legend.className = "legendbar";
+  body.appendChild(legend); body.appendChild(box);
+  els = { spans, box, legend, prev: null };
 }
 function drawText(scroll) {
   const f = current(); if (!f) return;
@@ -424,12 +451,15 @@ function drawText(scroll) {
   if (state.colorMode === "attn") {
     vals = meanVector(f); color = focusColor();
     const m = vmax(vals) || 1;
-    for (let i = 0; i < L; i++) vals[i] = vals[i] < state.minW ? 0 : Math.min(1, state.rowNorm ? vals[i] / m : vals[i]);
+    els.legend.innerHTML = legendHtml(color, m);
+    for (let i = 0; i < L; i++) vals[i] = vals[i] < state.minW ? 0 : intensity(vals[i], m);
   } else if (state.colorMode === "prob") {
     color = "#d62728"; vals = pr.target_prob.map((p) => (p == null ? 0 : 1 - p));
+    els.legend.innerHTML = `<span class="muted small">red intensity = 1 − p(token | prefix): darker = the model found this token less likely (linear)</span>`;
   } else {
     color = "#7c3aed"; const ent = pr.entropy, m = Math.max(...ent) || 1;
     vals = pr.tokens.map((_, i) => (i === 0 ? 0 : ent[i - 1] / m));
+    els.legend.innerHTML = `<span class="muted small">purple intensity = entropy of the prediction for this token / max entropy (${m.toFixed(2)} nats), linear</span>`;
   }
   for (let i = 0; i < L; i++) els.spans[i].style.background = vals[i] > 0.004 ? rgba(color, vals[i] * 0.85) : "";
   if (els.prev != null) els.spans[els.prev].classList.remove("focus");
@@ -464,7 +494,7 @@ function buildMatrix() {
 }
 function computeMatrix() {
   const pr = P(), L = pr.seq_len, hs = selHeads();
-  const key = [state.p, state.layer, hs.join(","), state.hideBos, state.rowNorm, state.minW, focusColor()].join("|");
+  const key = [state.p, state.layer, state.scale, hs.join(","), state.hideBos, state.rowNorm, state.minW, focusColor()].join("|");
   if (els.matKey === key) return;
   const off = document.createElement("canvas"); off.width = L; off.height = L;
   const ctx = off.getContext("2d"), img = ctx.createImageData(L, L);
@@ -476,7 +506,7 @@ function computeMatrix() {
     const m = vmax(acc) || 1;
     for (let k = 0; k <= q; k++) {
       const v = acc[k]; if (v < state.minW || v <= 0) continue;
-      const a = Math.pow(Math.min(1, state.rowNorm ? v / m : v), 0.6);
+      const a = intensity(v, m);
       const o = (q * L + k) * 4; img.data[o] = r; img.data[o + 1] = g; img.data[o + 2] = b; img.data[o + 3] = Math.round(a * 255);
     }
   }
